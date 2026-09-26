@@ -338,3 +338,46 @@ def test_odwolana_is_inactive():
     assert not normalize.is_active_status("ODWOLANA")
     assert not normalize.is_active_status("ODWOŁANA")
     assert normalize.is_active_status("OPUBLIKOWANA")
+
+
+def test_schema_found_via_swagger_ui_and_params_listed():
+    swagger = {"openapi": "3.0.0", "paths": {"/usluga": {"get": {"parameters": [
+        {"name": "strona", "in": "query", "schema": {"type": "integer"}, "description": "Numer strony"},
+        {"$ref": "#/components/parameters/Status"}]}}},
+        "components": {"parameters": {"Status": {"name": "status", "in": "query",
+                                                  "schema": {"type": "string", "enum": ["OPUBLIKOWANA"]}}}}}
+
+    class SwaggerSession(FakeSession):
+        def get(self, url, params=None, headers=None, timeout=None):
+            self.gets.append((url, params, headers))
+            if url.endswith("/api/"):
+                r = FakeResponse(None); r.text = 'SwaggerUIBundle({ url: "schemat.json", dom_id: "#x" })'
+                return r
+            if url.endswith("/api/schemat.json"):
+                return FakeResponse(swagger)
+            return FakeResponse(None, status=404)
+
+    client = api.BurClient(api_key="k", session=SwaggerSession({}))
+    sch = client.schema()
+    assert sch["_zrodlo"] == "https://uslugirozwojowe.parp.gov.pl/api/schemat.json"
+    params = api.schema_params(sch)
+    assert [p["parametr"] for p in params] == ["strona", "status"]
+    assert "OPUBLIKOWANA" in params[1]["typ"]
+
+
+def test_slow_deep_pages_stop_search_with_clear_message():
+    import requests as rq
+
+    class SlowSession(BurLikeSession):
+        def get(self, url, params=None, headers=None, timeout=None):
+            if int((params or {}).get("strona", 1)) > 64:
+                raise rq.Timeout("read timed out")
+            return super().get(url, params, headers, timeout)
+
+    client = api.BurClient(api_key="k", email="e@x.pl", session=SlowSession(last_page=5000), sleep=lambda s: None)
+    try:
+        client.fetch_all("/usluga", page_size=100, max_pages=3)
+    except api.BurApiError as exc:
+        assert "Pobierz schemat API" in str(exc)
+    else:
+        raise AssertionError("powinien być czytelny błąd")

@@ -18,11 +18,13 @@ from dataclasses import dataclass, field
 from typing import Any
 
 import requests
+from urllib.parse import urljoin
 
 DEFAULT_BASE_URL = "https://uslugirozwojowe.parp.gov.pl/api"
 DEFAULT_AUTH_PATH = "/autoryzacja/logowanie"
 DEFAULT_SERVICES_PATH = "/usluga"
-SCHEMA_CANDIDATES = ("/schemat.json", "/schema.json", "/openapi.json", "/swagger.json", "/doc.json")
+SCHEMA_CANDIDATES = ("/schemat.json", "/schema.json", "/openapi.json", "/swagger.json", "/doc.json",
+                     "/docs.json", "/api-docs", "/v3/api-docs", "/swagger/v1/swagger.json", "/doc/schemat.json")
 
 # Klucze, pod którymi API zwykle zwraca listę rekordów w odpowiedzi stronicowanej.
 LIST_KEYS = ("data", "items", "lista", "wyniki", "rekordy", "content", "results", "uslugi", "elementy")
@@ -195,7 +197,13 @@ class BurClient:
 
     def get(self, path: str, params: dict | None = None) -> Any:
         headers = {"Authorization": f"Bearer {self.authenticate()}", "Accept": "application/json"}
-        resp = self.session.get(self._url(path), params=params or {}, headers=headers, timeout=self.timeout)
+        try:
+            resp = self.session.get(self._url(path), params=params or {}, headers=headers, timeout=self.timeout)
+        except requests.Timeout as exc:
+            self.fetch_info["timeouts"] = self.fetch_info.get("timeouts", 0) + 1
+            raise BurApiError(f"GET {self._url(path)} {params or ''} → brak odpowiedzi w {self.timeout} s") from exc
+        except requests.RequestException as exc:
+            raise BurApiError(f"GET {self._url(path)} → błąd połączenia: {exc}") from exc
         if resp.status_code >= 400:
             raise BurApiError(f"GET {resp.url} → {resp.status_code}: {resp.text[:300]}")
         try:
@@ -259,12 +267,23 @@ class BurClient:
 
     def find_last_page(self, path: str, query, start: int, limit: int = 1 << 22) -> int:
         """Ostatnia niepusta strona: podwajanie numeru, potem wyszukiwanie binarne (~2·log2(N) zapytań)."""
+        def exists(page: int) -> bool:
+            batch = self._page(path, query(page))
+            if self.fetch_info.get("timeouts", 0) >= 2:
+                raise BurApiError(
+                    f"BUR nie odpowiada w {self.timeout} s dla dalekich stron (np. strona {page}), więc nie da się "
+                    "przewinąć do najnowszych usług. Potrzebny jest filtr lub sortowanie po stronie API: "
+                    "w zakładce „🛠️ Diagnostyka API” kliknij „Pobierz schemat API” i pokaż parametry /usluga. "
+                    "Na razie możesz odznaczyć „Najpierw najnowsze usługi”."
+                )
+            return bool(batch)
+
         lo, hi = start, start + 1
-        while hi < limit and self._page(path, query(hi), retries=1):
+        while hi < limit and exists(hi):
             lo, hi = hi, hi * 2
         while hi - lo > 1:
             mid = (lo + hi) // 2
-            if self._page(path, query(mid), retries=1):
+            if exists(mid):
                 lo = mid
             else:
                 hi = mid
@@ -358,14 +377,27 @@ class BurClient:
         return records
 
     def schema(self) -> dict | None:
-        """Próbuje pobrać schemat OpenAPI (nie wymaga tokenu)."""
-        for candidate in SCHEMA_CANDIDATES:
+        """Pobiera schemat OpenAPI (bez tokenu): adres odczytany ze strony Swagger UI albo znane adresy."""
+        urls: list[str] = []
+        for page in ("/", "/swagger-initializer.js"):
+            page_url = self._url(page)
             try:
-                resp = self.session.get(self._url(candidate), timeout=self.timeout)
-                if resp.ok and "json" in resp.headers.get("content-type", ""):
-                    return resp.json()
+                resp = self.session.get(page_url, timeout=self.timeout)
             except requests.RequestException:
                 continue
+            if resp.ok:
+                found = re.findall(r"""url["']?\s*[:=]\s*["']([^"'\s]+\.json)["']""", resp.text)
+                urls += [urljoin(page_url if page_url.endswith("/") else page_url + "/", u) for u in found]
+        urls += [self._url(c) for c in SCHEMA_CANDIDATES]
+        for url in dict.fromkeys(urls):
+            try:
+                resp = self.session.get(url, timeout=self.timeout)
+                data = resp.json() if resp.ok else None
+            except (requests.RequestException, ValueError):
+                continue
+            if isinstance(data, dict) and "paths" in data:
+                data["_zrodlo"] = url
+                return data
         return None
 
 
@@ -381,5 +413,31 @@ def schema_paths(schema: dict) -> list[dict]:
                 "ścieżka": path,
                 "opis": spec.get("summary") or spec.get("description", ""),
                 "parametry": ", ".join(p.get("name", "") for p in spec.get("parameters", []) if isinstance(p, dict)),
+            })
+    return rows
+
+
+def schema_params(schema: dict, path_filter: str = "usluga") -> list[dict]:
+    """Parametry zapytań GET dla ścieżek zawierających path_filter – z typem i opisem."""
+    rows = []
+    for path, methods in (schema or {}).get("paths", {}).items():
+        if path_filter and path_filter not in path.lower():
+            continue
+        spec = methods.get("get") if isinstance(methods, dict) else None
+        if not isinstance(spec, dict):
+            continue
+        for p in list(methods.get("parameters", [])) + list(spec.get("parameters", [])):
+            if not isinstance(p, dict):
+                continue
+            if "$ref" in p:  # parametr zdefiniowany w components/parameters
+                ref = p["$ref"].split("/")[-1]
+                p = (schema.get("components", {}).get("parameters", {}).get(ref)
+                     or schema.get("parameters", {}).get(ref) or {"name": ref})
+            typ = (p.get("schema") or {}).get("type") or p.get("type", "")
+            enum = (p.get("schema") or {}).get("enum") or p.get("enum")
+            rows.append({
+                "ścieżka": path, "parametr": p.get("name", ""), "gdzie": p.get("in", ""),
+                "typ": typ + (f" {enum}" if enum else ""), "wymagany": bool(p.get("required")),
+                "opis": (p.get("description") or "")[:300],
             })
     return rows

@@ -366,6 +366,14 @@ with tab_diag:
                 st.error("Nie udało się pobrać schematu – otwórz dokumentację w przeglądarce: "
                          "https://uslugirozwojowe.parp.gov.pl/api/")
         if st.session_state.get("schema"):
+            sch = st.session_state["schema"]
+            st.caption(f"Schemat: {sch.get('_zrodlo', '')}")
+            st.markdown("**Parametry wyszukiwania usług (`/usluga`)** – zrób zrzut tej tabeli i wyślij:")
+            st.dataframe(pd.DataFrame(api.schema_params(sch, "usluga")), use_container_width=True, hide_index=True)
+            st.download_button("⬇️ Pobierz cały schemat (JSON)",
+                               json.dumps({k: v for k, v in sch.items() if k != "_zrodlo"}, ensure_ascii=False,
+                                          indent=1).encode("utf-8"), "bur_api_schemat.json", "application/json")
+            st.markdown("**Wszystkie endpointy**")
             st.dataframe(pd.DataFrame(api.schema_paths(st.session_state["schema"])),
                          use_container_width=True, hide_index=True)
 
