@@ -202,20 +202,22 @@ class BurClient:
             raise BurApiError(f"GET {resp.url} nie zwrócił JSON: {resp.text[:200]}") from exc
 
     # ── stronicowanie ─────────────────────────────────────────
-    def _page(self, path: str, params: dict) -> list[dict]:
-        """Jedna strona; błąd 4xx (np. strona poza zakresem) traktujemy jak pustą stronę."""
+    def _page(self, path: str, params: dict, tolerant: bool = True) -> list[dict]:
+        """Jedna strona. Przy tolerant błąd API = pusta strona: BUR odpowiada 500 zarówno na
+        nieznany parametr, jak i (czasem) na stronę poza zakresem."""
         self.fetch_info["requests"] = self.fetch_info.get("requests", 0) + 1
         try:
             return extract_records(self.get(path, params))
         except BurApiError as exc:
-            if " → 4" in str(exc):
+            if tolerant:
+                self.fetch_info.setdefault("errors", []).append(str(exc)[:200])
                 return []
             raise
 
     def detect_paging(self, path: str, params: dict, page_candidates: list[str],
                       size_candidates: list[str], page_size: int) -> dict:
         """Sprawdza, które nazwy parametrów strony i rozmiaru API faktycznie respektuje."""
-        base = self._page(path, params)
+        base = self._page(path, params, tolerant=False)
         info = {"page_param": "", "size_param": "", "size": len(base), "start": 1, "base_fp": _fp(base)}
         if not base:
             return info

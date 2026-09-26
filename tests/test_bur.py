@@ -282,3 +282,27 @@ def test_auto_paging_when_page_param_is_ignored():
     assert len(rows) == 2
     assert client.fetch_info["detected"]["page_param"] == ""
     assert client.fetch_info["newest_first"] is False
+
+
+class StrictBurSession(BurLikeSession):
+    """Jak BUR: nieznany parametr zapytania → 500 (zamiast go zignorować)."""
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        unknown = set(params or {}) - {"strona"}
+        if unknown:
+            self.gets.append((url, dict(params or {}), headers))
+            return FakeResponse({"tytul": "Wewnętrzny błąd serwera."}, status=500)
+        return super().get(url, params, headers, timeout)
+
+
+def test_auto_paging_survives_500_for_unknown_params():
+    session = StrictBurSession(last_page=800)
+    client = api.BurClient(api_key="k", email="e@x.pl", session=session)
+    rows = client.fetch_all("/usluga", page_size=100, max_pages=2)
+    assert client.fetch_info["detected"]["page_param"] == "strona"
+    assert client.fetch_info["detected"]["size_param"] == ""
+    assert client.fetch_info["pages"] == [800, 799]
+    assert len(rows) == 50
+    # Główne zapytania (bez próbnych nazw) nie wysyłają już nieobsługiwanych parametrów.
+    last_calls = [params for _, params, _ in session.gets[-2:]]
+    assert all(set(p) == {"strona"} for p in last_calls)

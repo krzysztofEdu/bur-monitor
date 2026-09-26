@@ -13,7 +13,14 @@ import pandas as pd
 import plotly.express as px
 import streamlit as st
 
+import importlib
+
 from bur import api, demo, normalize, poradnik
+
+# Streamlit Cloud po aktualizacji z GitHuba uruchamia nowy app.py, ale zostawia w pamięci
+# stare moduły bur.* – przeładowanie zapobiega mieszaniu wersji (stąd był błąd „?auto=100”).
+for _mod in (api, normalize, demo, poradnik):
+    importlib.reload(_mod)
 
 st.set_page_config(page_title="BUR Monitor", page_icon="📈", layout="wide")
 
