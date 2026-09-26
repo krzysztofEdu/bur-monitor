@@ -77,17 +77,42 @@ class BurClient:
     email: str = ""
     base_url: str = DEFAULT_BASE_URL
     auth_path: str = DEFAULT_AUTH_PATH
+    auth_body: str = ""  # szablon JSON, np. '{"nazwaUzytkownika": "{email}", "kluczAutoryzacyjny": "{key}"}'
     timeout: int = 30
     session: requests.Session = field(default_factory=requests.Session)
     _token: str | None = None
+    auth_log: str = ""
 
     def _url(self, path: str) -> str:
         if path.startswith("http"):
             return path
         return self.base_url.rstrip("/") + "/" + path.lstrip("/")
 
+    def _auth_bodies(self) -> list[dict]:
+        """Warianty treści logowania – własny szablon (auth_body) ma pierwszeństwo."""
+        if self.auth_body:
+            filled = self.auth_body.replace("{email}", self.email).replace("{key}", self.api_key)
+            try:
+                return [json.loads(filled)]
+            except json.JSONDecodeError as exc:
+                raise BurApiError(f"BUR_AUTH_BODY nie jest poprawnym JSON: {exc}") from exc
+        key, email = self.api_key, self.email
+        bodies = [
+            {"nazwaUzytkownika": email, "kluczAutoryzacyjny": key},
+            {"email": email, "kluczAutoryzacyjny": key},
+            {"login": email, "kluczAutoryzacyjny": key},
+            {"kluczAutoryzacyjny": key},
+            {"klucz": key},
+            {"apiKey": key},
+        ]
+        return [b for b in bodies if email or len(b) == 1]
+
     def authenticate(self) -> str:
-        """Zwraca token Bearer. Bez ścieżki logowania używa klucza wprost."""
+        """Zwraca token Bearer. Bez ścieżki logowania używa klucza wprost.
+
+        Próbuje kolejnych wariantów treści logowania; jeśli żaden nie zadziała,
+        zgłasza błąd z odpowiedzią serwera dla każdej próby.
+        """
         if self._token:
             return self._token
         if not self.api_key:
@@ -95,26 +120,31 @@ class BurClient:
         if not self.auth_path:
             self._token = self.api_key
             return self._token
-        body = {
-            "email": self.email,
-            "nazwaUzytkownika": self.email,
-            "kluczAutoryzacyjny": self.api_key,
-        }
-        resp = self.session.post(self._url(self.auth_path), json=body, timeout=self.timeout)
-        if resp.status_code >= 400:
-            raise BurApiError(
-                f"Logowanie nie powiodło się ({resp.status_code}) pod {self._url(self.auth_path)}: "
-                f"{resp.text[:300]}"
-            )
-        try:
-            payload = resp.json()
-        except ValueError:
-            payload = resp.text
-        token = find_token(payload)
-        if not token:
-            raise BurApiError(f"Odpowiedź logowania nie zawiera tokenu: {str(payload)[:300]}")
-        self._token = token
-        return token
+        url = self._url(self.auth_path)
+        attempts = []
+        for body in self._auth_bodies():
+            resp = self.session.post(url, json=body, timeout=self.timeout)
+            fields = ", ".join(body)
+            if resp.status_code >= 400:
+                attempts.append(f"• pola [{fields}] → {resp.status_code}: {resp.text[:160]}")
+                continue
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = resp.text
+            token = find_token(payload)
+            if token:
+                self._token = token
+                self.auth_log = f"Zalogowano (pola: {fields})."
+                return token
+            attempts.append(f"• pola [{fields}] → {resp.status_code}, brak tokenu: {str(payload)[:160]}")
+        hint = "" if self.email else " Uzupełnij też e-mail konta BUR (BUR_API_EMAIL)."
+        raise BurApiError(
+            f"Logowanie nie powiodło się pod {url}.{hint}\n"
+            + "\n".join(attempts)
+            + "\nSprawdź w dokumentacji (https://uslugirozwojowe.parp.gov.pl/api/) pola endpointu logowania "
+              "i wpisz je jako szablon BUR_AUTH_BODY."
+        )
 
     def get(self, path: str, params: dict | None = None) -> Any:
         headers = {"Authorization": f"Bearer {self.authenticate()}", "Accept": "application/json"}

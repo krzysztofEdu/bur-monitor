@@ -108,3 +108,46 @@ def test_filters_on_demo_data():
 def test_price_percentile():
     assert normalize.price_percentile(pd.Series([50, 100, 150, 200]), 120) == 50
     assert normalize.price_percentile(pd.Series([], dtype=float), 100) is None
+
+
+class PickySession(FakeSession):
+    """Serwer akceptuje tylko jeden wariant pól logowania, resztę odrzuca błędem 500."""
+
+    def __init__(self, accepted_fields):
+        super().__init__({1: {"data": [{"id": 1}]}})
+        self.accepted = set(accepted_fields)
+
+    def post(self, url, json=None, timeout=None):
+        self.posts.append((url, json))
+        if set(json) == self.accepted:
+            return FakeResponse({"token": "ok"})
+        return FakeResponse({"tytul": "Wewnętrzny błąd serwera."}, status=500)
+
+
+def test_login_falls_back_to_next_body_variant():
+    session = PickySession({"email", "kluczAutoryzacyjny"})
+    client = api.BurClient(api_key="k", email="e@x.pl", session=session)
+    assert client.authenticate() == "ok"
+    assert len(session.posts) == 2
+    assert "email" in client.auth_log
+
+
+def test_login_uses_custom_template():
+    session = PickySession({"user", "secret"})
+    client = api.BurClient(api_key="k", email="e@x.pl", session=session,
+                           auth_body='{"user": "{email}", "secret": "{key}"}')
+    assert client.authenticate() == "ok"
+    assert session.posts == [(session.posts[0][0], {"user": "e@x.pl", "secret": "k"})]
+
+
+def test_login_reports_every_attempt_when_all_fail():
+    session = PickySession({"nic"})
+    client = api.BurClient(api_key="k", email="", session=session)
+    try:
+        client.authenticate()
+    except api.BurApiError as exc:
+        msg = str(exc)
+    else:
+        raise AssertionError("powinien być błąd")
+    assert "BUR_API_EMAIL" in msg
+    assert msg.count("→ 500") == len(session.posts) == 3  # bez e-maila tylko warianty z samym kluczem

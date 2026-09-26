@@ -52,6 +52,7 @@ def fetch_services(cfg_json: str) -> list[dict]:
     cfg = json.loads(cfg_json)
     client = api.BurClient(
         api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"], auth_path=cfg["auth_path"],
+        auth_body=cfg["auth_body"],
     )
     return client.fetch_all(
         cfg["path"], params=cfg["params"], page_param=cfg["page_param"], size_param=cfg["size_param"],
@@ -77,6 +78,11 @@ with st.sidebar:
             base = st.text_input("Adres API", setting("BUR_API_URL", api.DEFAULT_BASE_URL))
             auth_path = st.text_input("Ścieżka logowania (pusta = klucz jako Bearer)",
                                       setting("BUR_AUTH_PATH", api.DEFAULT_AUTH_PATH))
+            auth_body = st.text_input(
+                "Szablon logowania (JSON, opcjonalnie)", setting("BUR_AUTH_BODY"),
+                placeholder='{"nazwaUzytkownika": "{email}", "kluczAutoryzacyjny": "{key}"}',
+                help="Puste = aplikacja próbuje kilku typowych wariantów. {email} i {key} są podstawiane automatycznie.",
+            )
             path = st.text_input("Ścieżka listy usług", setting("BUR_USLUGI_PATH", api.DEFAULT_SERVICES_PATH))
             params_txt = st.text_area("Dodatkowe parametry (JSON)", setting("BUR_USLUGI_PARAMS", "{}"),
                                       help='Np. {"status": "opublikowana"} – nazwy sprawdź w Diagnostyce API.')
@@ -95,7 +101,7 @@ with st.sidebar:
                 st.error("Dodatkowe parametry to niepoprawny JSON.")
                 params = None
             if params is not None:
-                cfg = dict(key=key, email=email, base=base, auth_path=auth_path, path=path, params=params,
+                cfg = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body, path=path, params=params,
                            page_param=page_param, size_param=size_param, page_size=int(page_size),
                            start_page=int(start_page), max_pages=int(max_pages))
                 with st.spinner("Pobieram dane z API BUR…"):
@@ -105,7 +111,7 @@ with st.sidebar:
                     except (api.BurApiError, OSError) as exc:
                         st.error(f"Błąd API: {exc}")
                         st.info("Sprawdź ścieżki w zakładce „🛠️ Diagnostyka API”.")
-        st.session_state["api_cfg"] = dict(key=key, email=email, base=base, auth_path=auth_path)
+        st.session_state["api_cfg"] = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body)
 
     elif zrodlo == "Plik CSV/JSON":
         up = st.file_uploader("Eksport z BUR lub zapisana odpowiedź API", type=["csv", "json"])
@@ -285,6 +291,15 @@ with tab_diag:
             st.dataframe(pd.DataFrame(api.schema_paths(st.session_state["schema"])),
                          use_container_width=True, hide_index=True)
 
+        if st.button("🔑 Testuj logowanie"):
+            client = api.BurClient(api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"],
+                                   auth_path=cfg["auth_path"], auth_body=cfg["auth_body"])
+            try:
+                client.authenticate()
+                st.success(client.auth_log or "Token uzyskany.")
+            except (api.BurApiError, OSError) as exc:
+                st.error(str(exc))
+
         st.markdown("**Testowe zapytanie GET**")
         t1, t2 = st.columns([2, 3])
         test_path = t1.text_input("Ścieżka", api.DEFAULT_SERVICES_PATH, key="test_path")
@@ -292,7 +307,7 @@ with tab_diag:
         if st.button("▶️ Wyślij"):
             try:
                 client = api.BurClient(api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"],
-                                       auth_path=cfg["auth_path"])
+                                       auth_path=cfg["auth_path"], auth_body=cfg["auth_body"])
                 st.json(client.get(test_path, json.loads(test_params or "{}")))
             except (api.BurApiError, OSError, json.JSONDecodeError) as exc:
                 st.error(str(exc))
