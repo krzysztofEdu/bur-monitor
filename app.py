@@ -48,16 +48,18 @@ def setting(name: str, default: str = "") -> str:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_services(cfg_json: str) -> list[dict]:
+def fetch_services(cfg_json: str) -> dict:
     cfg = json.loads(cfg_json)
     client = api.BurClient(
         api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"], auth_path=cfg["auth_path"],
         auth_body=cfg["auth_body"],
     )
-    return client.fetch_all(
+    records = client.fetch_all(
         cfg["path"], params=cfg["params"], page_param=cfg["page_param"], size_param=cfg["size_param"],
         page_size=cfg["page_size"], start_page=cfg["start_page"], max_pages=cfg["max_pages"],
+        newest_first=cfg["newest_first"],
     )
+    return {"records": records, "info": client.fetch_info}
 
 
 with st.sidebar:
@@ -93,6 +95,8 @@ with st.sidebar:
             start_page = c3.number_input("1. strona", 0, 1, 1)
             page_size = c4.number_input("Na stronę", 10, 1000, 100, step=10)
             max_pages = c5.number_input("Maks. stron", 1, 500, 20)
+        newest_first = st.checkbox("Najpierw najnowsze usługi", value=True,
+                                   help="API zwraca usługi od najstarszych (2015 r.). Ta opcja pobiera ostatnie strony.")
 
         if st.button("🔄 Pobierz usługi z BUR", type="primary", use_container_width=True):
             try:
@@ -103,14 +107,24 @@ with st.sidebar:
             if params is not None:
                 cfg = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body, path=path, params=params,
                            page_param=page_param, size_param=size_param, page_size=int(page_size),
-                           start_page=int(start_page), max_pages=int(max_pages))
+                           start_page=int(start_page), max_pages=int(max_pages), newest_first=newest_first)
                 with st.spinner("Pobieram dane z API BUR…"):
                     try:
-                        st.session_state["records"] = fetch_services(json.dumps(cfg, sort_keys=True))
+                        result = fetch_services(json.dumps(cfg, sort_keys=True))
+                        st.session_state["records"] = result["records"]
+                        st.session_state["fetch_info"] = result["info"]
                         st.session_state["source"] = "API BUR"
                     except (api.BurApiError, OSError) as exc:
                         st.error(f"Błąd API: {exc}")
                         st.info("Sprawdź ścieżki w zakładce „🛠️ Diagnostyka API”.")
+        info = st.session_state.get("fetch_info")
+        if st.session_state.get("source") == "API BUR" and info is not None:
+            n = len(st.session_state.get("records", []))
+            pages = info.get("pages", [])
+            st.success(f"Pobrano {n} usług" + (f" (strony {min(pages)}–{max(pages)})." if pages else "."))
+            if newest_first and not info.get("newest_first"):
+                st.warning("API nie podało liczby stron, więc pobrano usługi od najstarszych. "
+                           "Pokaż mi odpowiedź z „Testowego zapytania” w Diagnostyce – dopasuję stronicowanie.")
         st.session_state["api_cfg"] = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body)
 
     elif zrodlo == "Plik CSV/JSON":
@@ -141,7 +155,8 @@ mapping = st.session_state["mapping"]
 df = pd.DataFrame()
 if not raw.empty:
     try:
-        df = normalize.build_frame(raw, mapping)
+        grosze = {"auto": None, "grosze": True, "złote": False}[st.session_state.get("price_unit", "auto")]
+        df = normalize.build_frame(raw, mapping, grosze=grosze)
     except Exception as exc:  # nieoczekiwany format danych z API nie może wywrócić całej aplikacji
         st.error(f"Nie udało się przetworzyć danych ({type(exc).__name__}: {exc}). "
                  "Sprawdź mapowanie pól w zakładce „🛠️ Diagnostyka API”.")
@@ -157,7 +172,16 @@ with tab_rynek:
         if st.session_state.get("source") == "demo":
             st.warning("Oglądasz **fikcyjne dane demonstracyjne** – nie opisują rzeczywistego rynku.")
         else:
-            st.caption(f"Źródło: {st.session_state.get('source')} · rekordów: {len(df)}")
+            dates = df["data_od"].dropna()
+            zakres_txt = f" · starty usług: {dates.min():%Y-%m-%d} – {dates.max():%Y-%m-%d}" if not dates.empty else ""
+            grosze_txt = " · ceny przeliczone z groszy na zł" if df.attrs.get("grosze") else ""
+            st.caption(f"Źródło: {st.session_state.get('source')} · rekordów: {len(df)}{zakres_txt}{grosze_txt}")
+            if not dates.empty and dates.max() < pd.Timestamp(date.today()):
+                st.warning(
+                    f"Wszystkie pobrane usługi zaczęły się przed dzisiejszą datą (najnowsza: {dates.max():%Y-%m-%d}). "
+                    "API zwraca usługi od najstarszych – zaznacz w panelu bocznym „Najpierw najnowsze usługi” "
+                    "i pobierz ponownie, albo poszerz zakres dat poniżej."
+                )
 
         f1, f2, f3 = st.columns([2, 3, 2])
         tematy = f1.multiselect("Temat", list(normalize.TEMATY) + ["Inne"], default=list(normalize.TEMATY),
@@ -166,7 +190,7 @@ with tab_rynek:
         wojewodztwa = f2.multiselect("Województwa (puste = cała Polska)", woj_opts, placeholder="Wybierz województwa…")
         fraza = f3.text_input("Fraza w tytule", placeholder="np. DAX, VBA, PL-300")
 
-        f4, f5 = st.columns([2, 3])
+        f4, f5, f6 = st.columns([2, 2, 2])
         has_dates = df["data_od"].notna().any()
         zakres = f4.date_input("Start usługi między", (date.today(), date.today() + timedelta(days=180)),
                                disabled=not has_dates)
@@ -174,7 +198,12 @@ with tab_rynek:
         formy = f5.multiselect("Forma", formy_opts, disabled=not formy_opts, placeholder="Wszystkie formy")
 
         od, do = (zakres if isinstance(zakres, tuple) and len(zakres) == 2 else (None, None)) if has_dates else (None, None)
-        view = normalize.filter_frame(df, tematy, fraza, wojewodztwa, od, do, formy)
+        status_opts = sorted(x for x in df["status"].unique() if x)
+        statusy = f6.multiselect("Status", status_opts,
+                                 default=[x for x in status_opts if normalize.is_active_status(x)],
+                                 disabled=not status_opts, placeholder="Wszystkie statusy",
+                                 help="Domyślnie ukryte są usługi zrealizowane, anulowane i zawieszone.")
+        view = normalize.filter_frame(df, tematy, fraza, wojewodztwa, od, do, formy, statusy)
 
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Usługi", len(view))
@@ -186,6 +215,15 @@ with tab_rynek:
 
         if view.empty:
             st.warning("Żadna usługa nie spełnia filtrów.")
+            # Pokaż, który filtr „zjada” rekordy – najczęstsza przyczyna pustego widoku.
+            kroki = [
+                ("status", normalize.filter_frame(df, statusy=statusy)),
+                ("temat", normalize.filter_frame(df, tematy=tematy)),
+                ("daty startu", normalize.filter_frame(df, od=od, do=do)),
+                ("województwa", normalize.filter_frame(df, wojewodztwa=wojewodztwa)),
+            ]
+            st.caption("Ile usług przechodzi przez każdy filtr osobno: " +
+                       " · ".join(f"{nazwa}: {len(v)}/{len(df)}" for nazwa, v in kroki))
         else:
             def hbar(series: pd.Series, title: str, xlabel: str, fmt: str = ",.0f"):
                 data = series.sort_values().tail(15).reset_index()
@@ -242,15 +280,19 @@ with tab_rynek:
                 )
 
             st.subheader("📋 Usługi")
-            show = view[["tytul", "dostawca", "wojewodztwo", "forma", "data_od", "godziny", "cena", "cena_h",
-                         "temat", "link"]].sort_values("data_od")
+            show = view[["tytul", "dostawca", "wojewodztwo", "miejscowosc", "forma", "status", "data_od",
+                         "rekrutacja_do", "godziny", "cena", "cena_h", "dofinansowanie", "temat", "link"]
+                        ].sort_values("data_od")
             st.dataframe(
                 show, use_container_width=True, hide_index=True,
                 column_config={
-                    "tytul": "Tytuł", "dostawca": "Dostawca", "wojewodztwo": "Województwo", "forma": "Forma",
+                    "tytul": "Tytuł", "dostawca": "Dostawca", "wojewodztwo": "Województwo",
+                    "miejscowosc": "Miejscowość", "forma": "Forma", "status": "Status",
                     "data_od": st.column_config.DateColumn("Start", format="YYYY-MM-DD"),
+                    "rekrutacja_do": st.column_config.DateColumn("Zapisy do", format="YYYY-MM-DD"),
+                    "dofinansowanie": "Dofinans.",
                     "godziny": st.column_config.NumberColumn("Godz.", format="%d"),
-                    "cena": st.column_config.NumberColumn("Cena (zł)", format="%.0f"),
+                    "cena": st.column_config.NumberColumn("Cena/uczestnika (zł)", format="%.0f"),
                     "cena_h": st.column_config.NumberColumn("zł/godz.", format="%.0f"),
                     "temat": "Temat",
                     "link": st.column_config.LinkColumn("Karta usługi", display_text="otwórz"),
@@ -328,7 +370,10 @@ with tab_diag:
         labels = {"id": "ID usługi", "tytul": "Tytuł", "dostawca": "Dostawca", "wojewodztwo": "Województwo",
                   "miejscowosc": "Miejscowość", "cena": "Cena całkowita", "cena_h": "Cena za godzinę",
                   "godziny": "Liczba godzin", "data_od": "Data rozpoczęcia", "data_do": "Data zakończenia",
-                  "forma": "Forma", "kategoria": "Kategoria", "dofinansowanie": "Dofinansowanie / projekt"}
+                  "forma": "Forma", "kategoria": "Kategoria", "dofinansowanie": "Dofinansowanie / projekt",
+                  "rekrutacja_do": "Koniec rekrutacji", "status": "Status usługi"}
+        st.radio("Jednostka cen w danych", ["auto", "grosze", "złote"], horizontal=True, key="price_unit",
+                 help="API BUR podaje ceny w groszach (20500 = 205 zł). „auto” wykrywa to po wysokości stawek.")
         grid = st.columns(3)
         new_mapping = {}
         for n, canon in enumerate(normalize.CANONICAL):

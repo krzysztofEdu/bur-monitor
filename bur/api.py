@@ -11,6 +11,8 @@ a zakładka „Diagnostyka API” pozwala podejrzeć schemat i przetestować zap
 from __future__ import annotations
 
 import json
+import math
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -56,6 +58,38 @@ def extract_records(payload: Any) -> list[dict]:
     return []
 
 
+_PAGES_KEY = re.compile(r"(liczba|ilosc|total|count).*(stron|pages)|^(stron|pages)$|lastpage|ostatniastrona")
+_TOTAL_KEY = re.compile(r"(liczba|ilosc|total|count).*(wszyst|element|rekord|wynik|uslug|items|records|elements)"
+                        r"|^(total|count|totalcount)$")
+
+
+def page_meta(payload: Any, page_size: int) -> dict:
+    """Szuka w odpowiedzi informacji o stronicowaniu: liczby stron lub wszystkich rekordów."""
+    meta: dict = {}
+
+    def walk(obj: Any, depth: int = 0) -> None:
+        if not isinstance(obj, dict) or depth > 2:
+            return
+        for key, value in obj.items():
+            k = re.sub(r"[^a-z]", "", key.lower())
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, (int, float)) and value >= 0:
+                if "pages" not in meta and _PAGES_KEY.search(k):
+                    meta["pages"] = int(value)
+                    meta["pages_key"] = key
+                elif "total" not in meta and _TOTAL_KEY.search(k):
+                    meta["total"] = int(value)
+                    meta["total_key"] = key
+            elif isinstance(value, dict):
+                walk(value, depth + 1)
+
+    walk(payload)
+    if "pages" not in meta and meta.get("total") and page_size:
+        meta["pages"] = math.ceil(meta["total"] / page_size)
+    return meta
+
+
 def find_token(payload: Any) -> str | None:
     """Szuka tokenu w (zagnieżdżonej) odpowiedzi logowania."""
     if isinstance(payload, str) and payload.strip():
@@ -82,6 +116,7 @@ class BurClient:
     session: requests.Session = field(default_factory=requests.Session)
     _token: str | None = None
     auth_log: str = ""
+    fetch_info: dict = field(default_factory=dict)
 
     def _url(self, path: str) -> str:
         if path.startswith("http"):
@@ -165,19 +200,42 @@ class BurClient:
         page_size: int = 100,
         start_page: int = 1,
         max_pages: int = 20,
+        newest_first: bool = True,
         progress=None,
     ) -> list[dict]:
-        """Pobiera kolejne strony, aż zabraknie danych lub osiągnięty zostanie limit."""
+        """Pobiera kolejne strony, aż zabraknie danych lub osiągnięty zostanie limit.
+
+        API BUR zwraca usługi od najstarszych (2015 r.), więc przy newest_first klient
+        odczytuje z pierwszej odpowiedzi liczbę stron i pobiera od ostatniej wstecz.
+        Podsumowanie trafia do ``self.fetch_info``.
+        """
+        def query(page: int) -> dict:
+            q = dict(params or {})
+            if page_param:
+                q[page_param] = page
+            if size_param:
+                q[size_param] = page_size
+            return q
+
+        first_payload = self.get(path, query(start_page))
+        meta = page_meta(first_payload, page_size)
+        self.fetch_info = {"meta": meta, "newest_first": False, "pages": []}
+
+        if newest_first and page_param and meta.get("pages", 0) > 1:
+            last = start_page + meta["pages"] - 1
+            pages = range(last, max(start_page, last - max_pages + 1) - 1, -1)
+            self.fetch_info["newest_first"] = True
+        else:
+            pages = range(start_page, start_page + max_pages)
+
         records: list[dict] = []
         seen_first: set[str] = set()
-        for i in range(max_pages):
-            query = dict(params or {})
-            if page_param:
-                query[page_param] = start_page + i
-            if size_param:
-                query[size_param] = page_size
-            batch = extract_records(self.get(path, query))
+        for i, page in enumerate(pages):
+            payload = first_payload if page == start_page else self.get(path, query(page))
+            batch = extract_records(payload)
             if not batch:
+                if self.fetch_info["newest_first"]:
+                    continue  # ostatnia strona bywa pusta – idź dalej wstecz
                 break
             # Zabezpieczenie: API ignoruje parametr strony → ta sama strona w kółko.
             fingerprint = json.dumps(batch[0], sort_keys=True, default=str)
@@ -185,9 +243,10 @@ class BurClient:
                 break
             seen_first.add(fingerprint)
             records.extend(batch)
+            self.fetch_info["pages"].append(page)
             if progress:
                 progress(i + 1, len(records))
-            if not page_param or len(batch) < page_size:
+            if not page_param or (not self.fetch_info["newest_first"] and len(batch) < page_size):
                 break
         return records
 
