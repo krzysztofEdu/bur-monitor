@@ -89,12 +89,15 @@ with st.sidebar:
             params_txt = st.text_area("Dodatkowe parametry (JSON)", setting("BUR_USLUGI_PARAMS", "{}"),
                                       help='Np. {"status": "opublikowana"} – nazwy sprawdź w Diagnostyce API.')
             c1, c2 = st.columns(2)
-            page_param = c1.text_input("Parametr strony", setting("BUR_PAGE_PARAM", "strona"))
-            size_param = c2.text_input("Parametr rozmiaru", setting("BUR_SIZE_PARAM", "iloscNaStronie"))
+            page_param = c1.text_input("Parametr strony", setting("BUR_PAGE_PARAM", "auto"),
+                                       help="„auto” = aplikacja sama sprawdza, którą nazwę API respektuje.")
+            size_param = c2.text_input("Parametr rozmiaru", setting("BUR_SIZE_PARAM", "auto"),
+                                       help="„auto” = wykrywanie; puste = nie wysyłaj rozmiaru strony.")
             c3, c4, c5 = st.columns(3)
             start_page = c3.number_input("1. strona", 0, 1, 1)
             page_size = c4.number_input("Na stronę", 10, 1000, 100, step=10)
-            max_pages = c5.number_input("Maks. stron", 1, 500, 20)
+            max_pages = c5.number_input("Maks. stron", 1, 2000, 100,
+                                        help="BUR zwraca 25 usług na stronę – 100 stron to 2500 najnowszych usług ze wszystkich branż.")
         newest_first = st.checkbox("Najpierw najnowsze usługi", value=True,
                                    help="API zwraca usługi od najstarszych (2015 r.). Ta opcja pobiera ostatnie strony.")
 
@@ -108,7 +111,7 @@ with st.sidebar:
                 cfg = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body, path=path, params=params,
                            page_param=page_param, size_param=size_param, page_size=int(page_size),
                            start_page=int(start_page), max_pages=int(max_pages), newest_first=newest_first)
-                with st.spinner("Pobieram dane z API BUR…"):
+                with st.spinner("Pobieram dane z API BUR… (szukanie najnowszych stron może potrwać do minuty)"):
                     try:
                         result = fetch_services(json.dumps(cfg, sort_keys=True))
                         st.session_state["records"] = result["records"]
@@ -122,9 +125,22 @@ with st.sidebar:
             n = len(st.session_state.get("records", []))
             pages = info.get("pages", [])
             st.success(f"Pobrano {n} usług" + (f" (strony {min(pages)}–{max(pages)})." if pages else "."))
+            det = info.get("detected", {})
+            opis = []
+            if det:
+                opis.append(f"parametr strony: `{det['page_param'] or '—'}`")
+                opis.append(f"rekordów na stronę: {det['size']}" + (f" (`{det['size_param']}`)" if det["size_param"] else ""))
+            if info.get("last_page"):
+                opis.append(f"ostatnia strona: {info['last_page']}")
+            opis.append(f"zapytań: {info.get('requests', 0)}")
+            st.caption(" · ".join(opis))
             if newest_first and not info.get("newest_first"):
-                st.warning("API nie podało liczby stron, więc pobrano usługi od najstarszych. "
-                           "Pokaż mi odpowiedź z „Testowego zapytania” w Diagnostyce – dopasuję stronicowanie.")
+                if det and not det["page_param"]:
+                    st.warning("API nie reaguje na żaden znany parametr numeru strony, więc pobrano tylko "
+                               "pierwszą stronę (najstarsze usługi). Pokaż mi schemat API z Diagnostyki – "
+                               "wpiszę właściwą nazwę parametru.")
+                else:
+                    st.warning("Nie udało się ustalić ostatniej strony – pobrano usługi od najstarszych.")
         st.session_state["api_cfg"] = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body)
 
     elif zrodlo == "Plik CSV/JSON":
@@ -351,7 +367,7 @@ with tab_diag:
         st.markdown("**Testowe zapytanie GET**")
         t1, t2 = st.columns([2, 3])
         test_path = t1.text_input("Ścieżka", api.DEFAULT_SERVICES_PATH, key="test_path")
-        test_params = t2.text_input("Parametry (JSON)", '{"strona": 1, "iloscNaStronie": 5}', key="test_params")
+        test_params = t2.text_input("Parametry (JSON)", '{"strona": 2}', key="test_params")
         if st.button("▶️ Wyślij"):
             try:
                 client = api.BurClient(api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"],

@@ -53,7 +53,8 @@ def test_fetch_all_paginates_and_uses_bearer():
     pages = {1: {"data": [{"id": 1}, {"id": 2}]}, 2: {"data": [{"id": 3}]}}
     session = FakeSession(pages)
     client = api.BurClient(api_key="k", email="e@x.pl", session=session)
-    rows = client.fetch_all("/usluga", page_size=2)
+    rows = client.fetch_all("/usluga", page_param="strona", size_param="iloscNaStronie", page_size=2,
+                            newest_first=False)
     assert [r["id"] for r in rows] == [1, 2, 3]
     assert session.posts[0][1]["kluczAutoryzacyjny"] == "k"
     assert session.gets[0][2]["Authorization"] == "Bearer abc"
@@ -240,3 +241,44 @@ def test_zero_hours_and_prices_are_treated_as_missing():
     df = normalize.build_frame(raw, normalize.guess_mapping(list(raw.columns)), grosze=False)
     assert pd.isna(df.loc[0, "cena_h"]) and pd.isna(df.loc[0, "godziny"])
     assert df.loc[0, "cena"] == 220
+
+
+class BurLikeSession(FakeSession):
+    """Zachowuje się jak prawdziwe API BUR: stałe 25 rekordów na stronę, parametr rozmiaru
+    ignorowany, strony od 1, brak liczby stron w odpowiedzi, rekordy od najstarszych."""
+
+    def __init__(self, last_page=5000, per_page=25):
+        super().__init__({})
+        self.last_page, self.per_page = last_page, per_page
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        self.gets.append((url, dict(params or {}), headers))
+        page = int((params or {}).get("strona", 1))
+        if page < 1 or page > self.last_page:
+            return FakeResponse({"data": []})
+        first = (page - 1) * self.per_page
+        return FakeResponse({"data": [{"id": first + i} for i in range(self.per_page)]})
+
+
+def test_auto_paging_finds_newest_pages_without_metadata():
+    session = BurLikeSession(last_page=5000)
+    client = api.BurClient(api_key="k", email="e@x.pl", session=session)
+    rows = client.fetch_all("/usluga", page_size=100, max_pages=3)
+    info = client.fetch_info
+    assert info["detected"]["page_param"] == "strona"
+    assert info["detected"]["size_param"] == ""       # API ignoruje rozmiar strony
+    assert info["last_page"] == 5000
+    assert info["pages"] == [5000, 4999, 4998]
+    assert rows[0]["id"] == 4999 * 25                  # najnowsze usługi na początku
+    assert len(rows) == 75
+    assert info["requests"] < 60                       # wyszukiwanie, a nie przeglądanie 5000 stron
+
+
+def test_auto_paging_when_page_param_is_ignored():
+    session = FakeSession({})
+    session.get = lambda url, params=None, headers=None, timeout=None: FakeResponse([{"id": 1}, {"id": 2}])
+    client = api.BurClient(api_key="k", auth_path="", session=session)
+    rows = client.fetch_all("/usluga", page_size=100, max_pages=5)
+    assert len(rows) == 2
+    assert client.fetch_info["detected"]["page_param"] == ""
+    assert client.fetch_info["newest_first"] is False

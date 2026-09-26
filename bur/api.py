@@ -63,6 +63,16 @@ _TOTAL_KEY = re.compile(r"(liczba|ilosc|total|count).*(wszyst|element|rekord|wyn
                         r"|^(total|count|totalcount)$")
 
 
+PAGE_PARAM_CANDIDATES = ["strona", "numerStrony", "nrStrony", "page", "pageNumber", "p"]
+SIZE_PARAM_CANDIDATES = ["iloscNaStronie", "liczbaNaStronie", "rozmiarStrony", "liczbaElementow",
+                         "limit", "size", "pageSize", "perPage", "per_page"]
+
+
+def _fp(batch: list[dict]) -> str:
+    """Odcisk strony – do wykrywania, czy dwie odpowiedzi to ta sama strona."""
+    return json.dumps(batch[0], sort_keys=True, default=str) if batch else ""
+
+
 def page_meta(payload: Any, page_size: int) -> dict:
     """Szuka w odpowiedzi informacji o stronicowaniu: liczby stron lub wszystkich rekordów."""
     meta: dict = {}
@@ -191,26 +201,91 @@ class BurClient:
         except ValueError as exc:
             raise BurApiError(f"GET {resp.url} nie zwrócił JSON: {resp.text[:200]}") from exc
 
+    # ── stronicowanie ─────────────────────────────────────────
+    def _page(self, path: str, params: dict) -> list[dict]:
+        """Jedna strona; błąd 4xx (np. strona poza zakresem) traktujemy jak pustą stronę."""
+        self.fetch_info["requests"] = self.fetch_info.get("requests", 0) + 1
+        try:
+            return extract_records(self.get(path, params))
+        except BurApiError as exc:
+            if " → 4" in str(exc):
+                return []
+            raise
+
+    def detect_paging(self, path: str, params: dict, page_candidates: list[str],
+                      size_candidates: list[str], page_size: int) -> dict:
+        """Sprawdza, które nazwy parametrów strony i rozmiaru API faktycznie respektuje."""
+        base = self._page(path, params)
+        info = {"page_param": "", "size_param": "", "size": len(base), "start": 1, "base_fp": _fp(base)}
+        if not base:
+            return info
+        for cand in size_candidates:
+            want = page_size if page_size != len(base) else page_size + 7
+            got = self._page(path, {**params, cand: want})
+            if got and len(got) != len(base):
+                info["size_param"], info["size"] = cand, len(got)
+                break
+        sized = {**params, info["size_param"]: info["size"]} if info["size_param"] else dict(params)
+        first = self._page(path, sized) if info["size_param"] else base
+        for cand in page_candidates:
+            p2 = self._page(path, {**sized, cand: 2})
+            if p2 and _fp(p2) != _fp(first):
+                info["page_param"] = cand
+                p1 = self._page(path, {**sized, cand: 1})
+                info["start"] = 1 if _fp(p1) == _fp(first) else 0
+                break
+        return info
+
+    def find_last_page(self, path: str, query, start: int, limit: int = 1 << 22) -> int:
+        """Ostatnia niepusta strona: podwajanie numeru, potem wyszukiwanie binarne (~2·log2(N) zapytań)."""
+        lo, hi = start, start + 1
+        while hi < limit and self._page(path, query(hi)):
+            lo, hi = hi, hi * 2
+        while hi - lo > 1:
+            mid = (lo + hi) // 2
+            if self._page(path, query(mid)):
+                lo = mid
+            else:
+                hi = mid
+        return lo
+
     def fetch_all(
         self,
         path: str,
         params: dict | None = None,
-        page_param: str = "strona",
-        size_param: str = "iloscNaStronie",
+        page_param: str = "auto",
+        size_param: str = "auto",
         page_size: int = 100,
         start_page: int = 1,
         max_pages: int = 20,
         newest_first: bool = True,
         progress=None,
     ) -> list[dict]:
-        """Pobiera kolejne strony, aż zabraknie danych lub osiągnięty zostanie limit.
+        """Pobiera usługi strona po stronie.
 
-        API BUR zwraca usługi od najstarszych (2015 r.), więc przy newest_first klient
-        odczytuje z pierwszej odpowiedzi liczbę stron i pobiera od ostatniej wstecz.
+        page_param / size_param = "auto" → nazwy wykrywane spośród PAGE_PARAM_CANDIDATES /
+        SIZE_PARAM_CANDIDATES. API BUR zwraca usługi od najstarszych, więc przy newest_first
+        ustalana jest ostatnia strona (z metadanych albo wyszukiwaniem) i pobieranie idzie wstecz.
         Podsumowanie trafia do ``self.fetch_info``.
         """
+        params = dict(params or {})
+        self.fetch_info = {"newest_first": False, "pages": [], "requests": 0}
+
+        if page_param == "auto" or size_param == "auto":
+            detected = self.detect_paging(
+                path, params,
+                PAGE_PARAM_CANDIDATES if page_param == "auto" else [page_param] if page_param else [],
+                SIZE_PARAM_CANDIDATES if size_param == "auto" else [size_param] if size_param else [],
+                page_size,
+            )
+            page_param, size_param = detected["page_param"], detected["size_param"]
+            page_size = detected["size"] or page_size
+            if page_param:
+                start_page = detected["start"]
+            self.fetch_info["detected"] = {k: detected[k] for k in ("page_param", "size_param", "size", "start")}
+
         def query(page: int) -> dict:
-            q = dict(params or {})
+            q = dict(params)
             if page_param:
                 q[page_param] = page
             if size_param:
@@ -218,27 +293,31 @@ class BurClient:
             return q
 
         first_payload = self.get(path, query(start_page))
+        self.fetch_info["requests"] += 1
         meta = page_meta(first_payload, page_size)
-        self.fetch_info = {"meta": meta, "newest_first": False, "pages": []}
+        self.fetch_info["meta"] = meta
 
-        if newest_first and page_param and meta.get("pages", 0) > 1:
-            last = start_page + meta["pages"] - 1
+        if newest_first and page_param:
+            if meta.get("pages", 0) > 1:
+                last = start_page + meta["pages"] - 1
+            else:
+                last = self.find_last_page(path, query, start_page)
+            self.fetch_info["last_page"] = last
             pages = range(last, max(start_page, last - max_pages + 1) - 1, -1)
-            self.fetch_info["newest_first"] = True
+            self.fetch_info["newest_first"] = last > start_page
         else:
             pages = range(start_page, start_page + max_pages)
 
         records: list[dict] = []
         seen_first: set[str] = set()
         for i, page in enumerate(pages):
-            payload = first_payload if page == start_page else self.get(path, query(page))
-            batch = extract_records(payload)
+            batch = extract_records(first_payload) if page == start_page else self._page(path, query(page))
             if not batch:
                 if self.fetch_info["newest_first"]:
                     continue  # ostatnia strona bywa pusta – idź dalej wstecz
                 break
             # Zabezpieczenie: API ignoruje parametr strony → ta sama strona w kółko.
-            fingerprint = json.dumps(batch[0], sort_keys=True, default=str)
+            fingerprint = _fp(batch)
             if fingerprint in seen_first:
                 break
             seen_first.add(fingerprint)
@@ -246,7 +325,7 @@ class BurClient:
             self.fetch_info["pages"].append(page)
             if progress:
                 progress(i + 1, len(records))
-            if not page_param or (not self.fetch_info["newest_first"] and len(batch) < page_size):
+            if not page_param:
                 break
         return records
 
