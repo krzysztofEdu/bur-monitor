@@ -303,6 +303,8 @@ def test_auto_paging_survives_500_for_unknown_params():
     assert client.fetch_info["detected"]["size_param"] == ""
     assert client.fetch_info["pages"] == [800, 799]
     assert len(rows) == 50
+    assert client.fetch_info.get("errors", []) == []      # próby nazw nie są raportowane jako błędy
+    assert client.fetch_info["probe_errors"] > 0
     # Główne zapytania (bez próbnych nazw) nie wysyłają już nieobsługiwanych parametrów.
     last_calls = [params for _, params, _ in session.gets[-2:]]
     assert all(set(p) == {"strona"} for p in last_calls)

@@ -139,12 +139,13 @@ with st.sidebar:
                 opis.append(f"rekordów na stronę: {det['size']}" + (f" (`{det['size_param']}`)" if det["size_param"] else ""))
             if info.get("last_page"):
                 opis.append(f"ostatnia strona: {info['last_page']}")
-            opis.append(f"zapytań: {info.get('requests', 0)}")
+            opis.append(f"zapytań: {info.get('requests', 0)}"
+                        + (f", w tym {info['probe_errors']} próbnych" if info.get("probe_errors") else ""))
             st.caption(" · ".join(opis))
             bledy = info.get("errors", [])
             if bledy:
                 with st.expander(f"Odpowiedzi z błędem: {len(bledy)}"):
-                    st.caption("Część to normalne próby nazw parametrów (BUR odpowiada 500 na nieznany parametr). "
+                    st.caption("Błędy przy pobieraniu właściwych stron (próby nazw parametrów nie są tu liczone). "
                                "Jeśli usług jest mało, skopiuj te komunikaty.")
                     st.code("\n".join(bledy), language=None)
             if newest_first and not info.get("newest_first"):

@@ -204,11 +204,13 @@ class BurClient:
             raise BurApiError(f"GET {resp.url} nie zwrócił JSON: {resp.text[:200]}") from exc
 
     # ── stronicowanie ─────────────────────────────────────────
-    def _page(self, path: str, params: dict, tolerant: bool = True, retries: int = 0) -> list[dict] | None:
+    def _page(self, path: str, params: dict, tolerant: bool = True, retries: int = 0,
+              probe: bool = False) -> list[dict] | None:
         """Jedna strona: lista rekordów, [] gdy strona pusta, None gdy API zwróciło błąd.
 
         Przy tolerant błąd nie przerywa pobierania (BUR odpowiada 500 m.in. na nieznany parametr).
         retries > 0 ponawia zapytanie po krótkiej przerwie – na chwilowe błędy / limit zapytań.
+        probe = próba nazwy parametru: błąd jest spodziewany, więc nie trafia do listy błędów.
         """
         for attempt in range(retries + 1):
             self.fetch_info["requests"] = self.fetch_info.get("requests", 0) + 1
@@ -218,6 +220,9 @@ class BurClient:
                 if not tolerant:
                     raise
                 if attempt == retries:
+                    if probe:
+                        self.fetch_info["probe_errors"] = self.fetch_info.get("probe_errors", 0) + 1
+                        return None
                     errors = self.fetch_info.setdefault("errors", [])
                     if len(errors) < 50:
                         errors.append(str(exc)[:240])
@@ -234,14 +239,14 @@ class BurClient:
             return info
         for cand in size_candidates:
             want = page_size if page_size != len(base) else page_size + 7
-            got = self._page(path, {**params, cand: want})
+            got = self._page(path, {**params, cand: want}, probe=True)
             if got and len(got) != len(base):
                 info["size_param"], info["size"] = cand, len(got)
                 break
         sized = {**params, info["size_param"]: info["size"]} if info["size_param"] else dict(params)
         first = self._page(path, sized) if info["size_param"] else base
         for cand in page_candidates:
-            p2 = self._page(path, {**sized, cand: 2})
+            p2 = self._page(path, {**sized, cand: 2}, probe=True)
             if p2 and _fp(p2) != _fp(first):
                 info["page_param"] = cand
                 # Numeracja od 0 tylko wtedy, gdy strona 1 to NA PEWNO coś innego niż pierwsza strona;
