@@ -100,7 +100,7 @@ def _to_number(series: pd.Series) -> pd.Series:
         .str.replace(r"[^\d,.\-]", "", regex=True)
         .str.replace(",", ".", regex=False)
     )
-    return pd.to_numeric(cleaned, errors="coerce")
+    return pd.to_numeric(cleaned, errors="coerce").astype("float64")
 
 
 def voivodeship_key(name: str) -> str:
@@ -123,14 +123,14 @@ def build_frame(raw: pd.DataFrame, mapping: dict[str, str | None]) -> pd.DataFra
         col = mapping.get(canon)
         out[canon] = raw[col] if col and col in raw.columns else None
 
+    # Zawsze float64 – pandas 3 nie zmienia już typu kolumny przy przypisaniu (int64 + NaN = TypeError).
     for col in ("cena", "cena_h", "godziny"):
-        out[col] = _to_number(out[col]) if out[col].notna().any() else pd.NA
+        out[col] = _to_number(out[col])
     for col in ("data_od", "data_do"):
         out[col] = pd.to_datetime(out[col], errors="coerce", utc=True).dt.tz_localize(None)
 
-    missing_h = out["cena_h"].isna() & out["cena"].notna() & (out["godziny"] > 0)
-    out.loc[missing_h, "cena_h"] = out.loc[missing_h, "cena"] / out.loc[missing_h, "godziny"]
-    out[["cena", "cena_h", "godziny"]] = out[["cena", "cena_h", "godziny"]].astype("Float64")
+    computed_h = out["cena"] / out["godziny"].where(out["godziny"] > 0)
+    out["cena_h"] = out["cena_h"].fillna(computed_h)
 
     for col in ("tytul", "dostawca", "wojewodztwo", "miejscowosc", "forma", "kategoria"):
         out[col] = out[col].fillna("").astype(str).str.strip()

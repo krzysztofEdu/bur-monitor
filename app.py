@@ -138,7 +138,13 @@ if st.session_state.get("mapping_sig") != cols_sig:
     st.session_state["mapping_sig"] = cols_sig
 mapping = st.session_state["mapping"]
 
-df = normalize.build_frame(raw, mapping) if not raw.empty else pd.DataFrame()
+df = pd.DataFrame()
+if not raw.empty:
+    try:
+        df = normalize.build_frame(raw, mapping)
+    except Exception as exc:  # nieoczekiwany format danych z API nie może wywrócić całej aplikacji
+        st.error(f"Nie udało się przetworzyć danych ({type(exc).__name__}: {exc}). "
+                 "Sprawdź mapowanie pól w zakładce „🛠️ Diagnostyka API”.")
 
 tab_rynek, tab_sprzedaz, tab_diag = st.tabs(["📊 Rynek w BUR", "🧭 Jak sprzedawać w BUR", "🛠️ Diagnostyka API"])
 

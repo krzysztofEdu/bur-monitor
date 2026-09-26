@@ -151,3 +151,22 @@ def test_login_reports_every_attempt_when_all_fail():
         raise AssertionError("powinien być błąd")
     assert "BUR_API_EMAIL" in msg
     assert msg.count("→ 500") == len(session.posts) == 3  # bez e-maila tylko warianty z samym kluczem
+
+
+def test_numeric_columns_survive_missing_and_integer_values():
+    # Na pandas 3 kombinacja: cena/godz. jako int + brak liczby godzin kończyła się TypeError.
+    cases = [
+        [{"id": 1, "tytul": "Excel", "cena": 2400, "cenaZaGodzine": 100}],
+        [{"id": 1, "tytul": "Excel", "cena": 2400, "liczbaGodzin": None}],
+        [{"id": 1, "tytul": "Excel", "cena": 2400, "liczbaGodzin": 24, "cenaZaGodzine": None},
+         {"id": 2, "tytul": "SQL", "cena": 1600, "liczbaGodzin": 16, "cenaZaGodzine": 90}],
+        [{"id": 1, "tytul": "Excel"}],
+    ]
+    for recs in cases:
+        raw = normalize.flatten(recs)
+        df = normalize.build_frame(raw, normalize.guess_mapping(list(raw.columns)))
+        assert all(str(df[c].dtype) == "float64" for c in ("cena", "cena_h", "godziny"))
+    assert list(df.columns)  # ostatni przypadek: brak cen w ogóle nie wywraca aplikacji
+    raw = normalize.flatten(cases[2])
+    df = normalize.build_frame(raw, normalize.guess_mapping(list(raw.columns)))
+    assert df["cena_h"].tolist() == [100, 90]
