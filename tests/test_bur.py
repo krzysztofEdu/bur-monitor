@@ -306,3 +306,33 @@ def test_auto_paging_survives_500_for_unknown_params():
     # Główne zapytania (bez próbnych nazw) nie wysyłają już nieobsługiwanych parametrów.
     last_calls = [params for _, params, _ in session.gets[-2:]]
     assert all(set(p) == {"strona"} for p in last_calls)
+
+
+class FlakySession(BurLikeSession):
+    """Strona 1 czasem zwraca 500 (chwilowy błąd) – nie może to zmienić numeracji ani zatrzymać pobierania."""
+
+    def __init__(self, fail_times=1, **kw):
+        super().__init__(**kw)
+        self.fail_left = fail_times
+
+    def get(self, url, params=None, headers=None, timeout=None):
+        if (params or {}).get("strona") == 1 and self.fail_left > 0:
+            self.fail_left -= 1
+            self.gets.append((url, dict(params or {}), headers))
+            return FakeResponse({"tytul": "Wewnętrzny błąd serwera."}, status=500)
+        return super().get(url, params, headers, timeout)
+
+
+def test_transient_error_on_page_one_is_retried_not_misread_as_zero_based():
+    session = FlakySession(fail_times=1, last_page=40)
+    client = api.BurClient(api_key="k", email="e@x.pl", session=session, sleep=lambda s: None)
+    rows = client.fetch_all("/usluga", page_size=100, max_pages=3, newest_first=False)
+    assert client.fetch_info["detected"]["start"] == 1
+    assert client.fetch_info["pages"] == [1, 2, 3]
+    assert len(rows) == 75
+
+
+def test_odwolana_is_inactive():
+    assert not normalize.is_active_status("ODWOLANA")
+    assert not normalize.is_active_status("ODWOŁANA")
+    assert normalize.is_active_status("OPUBLIKOWANA")

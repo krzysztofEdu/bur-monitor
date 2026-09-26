@@ -11,6 +11,7 @@ a zakładka „Diagnostyka API” pozwala podejrzeć schemat i przetestować zap
 from __future__ import annotations
 
 import json
+import time
 import math
 import re
 from dataclasses import dataclass, field
@@ -127,6 +128,7 @@ class BurClient:
     _token: str | None = None
     auth_log: str = ""
     fetch_info: dict = field(default_factory=dict)
+    sleep: Any = field(default=time.sleep, repr=False)
 
     def _url(self, path: str) -> str:
         if path.startswith("http"):
@@ -202,17 +204,26 @@ class BurClient:
             raise BurApiError(f"GET {resp.url} nie zwrócił JSON: {resp.text[:200]}") from exc
 
     # ── stronicowanie ─────────────────────────────────────────
-    def _page(self, path: str, params: dict, tolerant: bool = True) -> list[dict]:
-        """Jedna strona. Przy tolerant błąd API = pusta strona: BUR odpowiada 500 zarówno na
-        nieznany parametr, jak i (czasem) na stronę poza zakresem."""
-        self.fetch_info["requests"] = self.fetch_info.get("requests", 0) + 1
-        try:
-            return extract_records(self.get(path, params))
-        except BurApiError as exc:
-            if tolerant:
-                self.fetch_info.setdefault("errors", []).append(str(exc)[:200])
-                return []
-            raise
+    def _page(self, path: str, params: dict, tolerant: bool = True, retries: int = 0) -> list[dict] | None:
+        """Jedna strona: lista rekordów, [] gdy strona pusta, None gdy API zwróciło błąd.
+
+        Przy tolerant błąd nie przerywa pobierania (BUR odpowiada 500 m.in. na nieznany parametr).
+        retries > 0 ponawia zapytanie po krótkiej przerwie – na chwilowe błędy / limit zapytań.
+        """
+        for attempt in range(retries + 1):
+            self.fetch_info["requests"] = self.fetch_info.get("requests", 0) + 1
+            try:
+                return extract_records(self.get(path, params))
+            except BurApiError as exc:
+                if not tolerant:
+                    raise
+                if attempt == retries:
+                    errors = self.fetch_info.setdefault("errors", [])
+                    if len(errors) < 50:
+                        errors.append(str(exc)[:240])
+                    return None
+                self.sleep(1.5 * (attempt + 1))
+        return None
 
     def detect_paging(self, path: str, params: dict, page_candidates: list[str],
                       size_candidates: list[str], page_size: int) -> dict:
@@ -233,19 +244,22 @@ class BurClient:
             p2 = self._page(path, {**sized, cand: 2})
             if p2 and _fp(p2) != _fp(first):
                 info["page_param"] = cand
-                p1 = self._page(path, {**sized, cand: 1})
-                info["start"] = 1 if _fp(p1) == _fp(first) else 0
+                # Numeracja od 0 tylko wtedy, gdy strona 1 to NA PEWNO coś innego niż pierwsza strona;
+                # błąd przy stronie 1 nie może tego przesądzić.
+                p1 = self._page(path, {**sized, cand: 1}, retries=2)
+                p0 = self._page(path, {**sized, cand: 0}, retries=1) if p1 and _fp(p1) != _fp(first) else None
+                info["start"] = 0 if p0 and _fp(p0) == _fp(first) else 1
                 break
         return info
 
     def find_last_page(self, path: str, query, start: int, limit: int = 1 << 22) -> int:
         """Ostatnia niepusta strona: podwajanie numeru, potem wyszukiwanie binarne (~2·log2(N) zapytań)."""
         lo, hi = start, start + 1
-        while hi < limit and self._page(path, query(hi)):
+        while hi < limit and self._page(path, query(hi), retries=1):
             lo, hi = hi, hi * 2
         while hi - lo > 1:
             mid = (lo + hi) // 2
-            if self._page(path, query(mid)):
+            if self._page(path, query(mid), retries=1):
                 lo = mid
             else:
                 hi = mid
@@ -312,8 +326,15 @@ class BurClient:
 
         records: list[dict] = []
         seen_first: set[str] = set()
+        failures = 0
         for i, page in enumerate(pages):
-            batch = extract_records(first_payload) if page == start_page else self._page(path, query(page))
+            batch = (extract_records(first_payload) if page == start_page
+                     else self._page(path, query(page), retries=2))
+            if batch is None:  # błąd API – pomiń stronę, ale nie w nieskończoność
+                failures += 1
+                if failures >= 5:
+                    break
+                continue
             if not batch:
                 if self.fetch_info["newest_first"]:
                     continue  # ostatnia strona bywa pusta – idź dalej wstecz

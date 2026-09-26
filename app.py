@@ -105,7 +105,7 @@ with st.sidebar:
             page_size = c4.number_input("Na stronę", 10, 1000, 100, step=10)
             max_pages = c5.number_input("Maks. stron", 1, 2000, 100,
                                         help="BUR zwraca 25 usług na stronę – 100 stron to 2500 najnowszych usług ze wszystkich branż.")
-        newest_first = st.checkbox("Najpierw najnowsze usługi", value=True,
+        newest_first = st.checkbox("Najpierw najnowsze usługi (zalecane)", value=True, key="newest_first",
                                    help="API zwraca usługi od najstarszych (2015 r.). Ta opcja pobiera ostatnie strony.")
 
         if st.button("🔄 Pobierz usługi z BUR", type="primary", use_container_width=True):
@@ -141,6 +141,12 @@ with st.sidebar:
                 opis.append(f"ostatnia strona: {info['last_page']}")
             opis.append(f"zapytań: {info.get('requests', 0)}")
             st.caption(" · ".join(opis))
+            bledy = info.get("errors", [])
+            if bledy:
+                with st.expander(f"Odpowiedzi z błędem: {len(bledy)}"):
+                    st.caption("Część to normalne próby nazw parametrów (BUR odpowiada 500 na nieznany parametr). "
+                               "Jeśli usług jest mało, skopiuj te komunikaty.")
+                    st.code("\n".join(bledy), language=None)
             if newest_first and not info.get("newest_first"):
                 if det and not det["page_param"]:
                     st.warning("API nie reaguje na żaden znany parametr numeru strony, więc pobrano tylko "

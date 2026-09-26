@@ -147,7 +147,7 @@ def assign_topic(text: str) -> str:
 
 
 # Statusy usług, których nie da się już kupić – domyślnie ukrywane.
-_INACTIVE_STATUS = re.compile(r"zrealizow|anulow|wycofan|zawiesz|usuni|zakoncz|archiw|odrzuc")
+_INACTIVE_STATUS = re.compile(r"zrealizow|anulow|odwol|wycofan|zawiesz|usuni|zakoncz|archiw|odrzuc|nieaktyw")
 
 
 def is_active_status(status: str) -> bool:
