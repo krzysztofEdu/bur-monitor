@@ -66,6 +66,15 @@ _TOTAL_KEY = re.compile(r"(liczba|ilosc|total|count).*(wszyst|element|rekord|wyn
                         r"|^(total|count|totalcount)$")
 
 
+# Numery województw w API BUR (parametr idWojewodztwa) – kolejność alfabetyczna; potwierdzone na danych:
+# lubuskie=4, mazowieckie=7, śląskie=12.
+WOJEWODZTWO_ID = {
+    "dolnośląskie": 1, "kujawsko-pomorskie": 2, "lubelskie": 3, "lubuskie": 4, "łódzkie": 5,
+    "małopolskie": 6, "mazowieckie": 7, "opolskie": 8, "podkarpackie": 9, "podlaskie": 10,
+    "pomorskie": 11, "śląskie": 12, "świętokrzyskie": 13, "warmińsko-mazurskie": 14,
+    "wielkopolskie": 15, "zachodniopomorskie": 16,
+}
+
 PAGE_PARAM_CANDIDATES = ["strona", "numerStrony", "nrStrony", "page", "pageNumber", "p"]
 SIZE_PARAM_CANDIDATES = ["iloscNaStronie", "liczbaNaStronie", "rozmiarStrony", "liczbaElementow",
                          "limit", "size", "pageSize", "perPage", "per_page"]
@@ -375,6 +384,11 @@ class BurClient:
             if not page_param:
                 break
         return records
+
+    def service_by_id(self, service_id: int, path: str = DEFAULT_SERVICES_PATH) -> dict | None:
+        """Jedna usługa po ID (filtr ``id`` w /usluga) – np. żeby odczytać jej kategorię."""
+        records = extract_records(self.get(path, {"id": int(service_id)}))
+        return records[0] if records else None
 
     def schema(self) -> dict | None:
         """Pobiera schemat OpenAPI (bez tokenu): adres odczytany ze strony Swagger UI albo znane adresy."""

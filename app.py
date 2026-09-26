@@ -61,12 +61,44 @@ def fetch_services(cfg_json: str) -> dict:
         api_key=cfg["key"], email=cfg["email"], base_url=cfg["base"], auth_path=cfg["auth_path"],
         auth_body=cfg["auth_body"],
     )
-    records = client.fetch_all(
-        cfg["path"], params=cfg["params"], page_param=cfg["page_param"], size_param=cfg["size_param"],
-        page_size=cfg["page_size"], start_page=cfg["start_page"], max_pages=cfg["max_pages"],
-        newest_first=cfg["newest_first"],
-    )
-    return {"records": records, "info": client.fetch_info}
+    base_params = dict(cfg["params"])
+    for key_, val in (("idKategoriiUslugi", cfg["kategoria"]), ("idPodkategoriiUslugi", cfg["podkategoria"])):
+        if val:
+            base_params[key_] = int(val)
+    # Jedno pobieranie na województwo (filtr po stronie BUR = mniejszy zbiór = najnowsze strony blisko).
+    regiony = [(w, api.WOJEWODZTWO_ID[w]) for w in cfg["wojewodztwa"]] or [("cała Polska", None)]
+    records, seen, summary = [], set(), []
+    total = {"requests": 0, "probe_errors": 0, "errors": [], "pages": [], "newest_first": False}
+    for nazwa, woj_id in regiony:
+        params = dict(base_params, **({"idWojewodztwa": woj_id} if woj_id else {}))
+        row = {"region": nazwa, "usług": 0, "ostatnia strona": None, "błąd": ""}
+        try:
+            batch = client.fetch_all(
+                cfg["path"], params=params, page_param=cfg["page_param"], size_param=cfg["size_param"],
+                page_size=cfg["page_size"], start_page=cfg["start_page"], max_pages=cfg["max_pages"],
+                newest_first=cfg["newest_first"],
+            )
+        except api.BurApiError as exc:
+            batch, row["błąd"] = [], str(exc)[:300]
+        info = client.fetch_info
+        for r in batch:
+            if r.get("id") not in seen:
+                seen.add(r.get("id"))
+                records.append(r)
+        row["usług"] = len(batch)
+        row["ostatnia strona"] = info.get("last_page")
+        summary.append(row)
+        total["requests"] += info.get("requests", 0)
+        total["probe_errors"] += info.get("probe_errors", 0)
+        total["errors"] += info.get("errors", [])
+        total["pages"] += info.get("pages", [])
+        total["newest_first"] |= bool(info.get("newest_first"))
+        if "detected" in info:
+            total["detected"] = info["detected"]
+    if not records and all(r["błąd"] for r in summary):
+        raise api.BurApiError(summary[0]["błąd"])
+    total["regions"] = summary
+    return {"records": records, "info": total}
 
 
 with st.sidebar:
@@ -96,15 +128,51 @@ with st.sidebar:
             params_txt = st.text_area("Dodatkowe parametry (JSON)", setting("BUR_USLUGI_PARAMS", "{}"),
                                       help='Np. {"status": "opublikowana"} – nazwy sprawdź w Diagnostyce API.')
             c1, c2 = st.columns(2)
-            page_param = c1.text_input("Parametr strony", setting("BUR_PAGE_PARAM", "auto"),
-                                       help="„auto” = aplikacja sama sprawdza, którą nazwę API respektuje.")
-            size_param = c2.text_input("Parametr rozmiaru", setting("BUR_SIZE_PARAM", "auto"),
-                                       help="„auto” = wykrywanie; puste = nie wysyłaj rozmiaru strony.")
+            page_param = c1.text_input("Parametr strony", setting("BUR_PAGE_PARAM", "strona"),
+                                       help="Wg dokumentacji BUR: „strona”. „auto” = wykrywanie.")
+            size_param = c2.text_input("Parametr rozmiaru", setting("BUR_SIZE_PARAM", ""),
+                                       help="BUR nie ma takiego parametru (stałe 25 na stronę) – zostaw puste.")
             c3, c4, c5 = st.columns(3)
             start_page = c3.number_input("1. strona", 0, 1, 1)
             page_size = c4.number_input("Na stronę", 10, 1000, 100, step=10)
-            max_pages = c5.number_input("Maks. stron", 1, 2000, 100,
-                                        help="BUR zwraca 25 usług na stronę – 100 stron to 2500 najnowszych usług ze wszystkich branż.")
+            max_pages = c5.number_input("Maks. stron", 1, 2000, 40,
+                                        help="Na każde województwo. BUR zwraca 25 usług na stronę – 40 stron to 1000 najnowszych usług.")
+
+        st.markdown("**Filtry w BUR** (zawężają pobieranie – szybciej i świeższe dane)")
+        woj_api = st.multiselect("Województwa", list(api.WOJEWODZTWO_ID), key="woj_api",
+                                 placeholder="Cała Polska",
+                                 help="Każde województwo to osobne pobieranie. Puste = cała Polska.")
+        st.session_state.setdefault("kat_api", int(setting("BUR_KATEGORIA", "0") or 0))
+        st.session_state.setdefault("podkat_api", int(setting("BUR_PODKATEGORIA", "0") or 0))
+        k1, k2 = st.columns(2)
+        kategoria = k1.number_input("ID kategorii", 0, 100000, key="kat_api",
+                                    help="0 = wszystkie. Nie znasz? Odczytaj niżej z własnej usługi.")
+        podkategoria = k2.number_input("ID podkategorii", 0, 100000, key="podkat_api", help="0 = wszystkie.")
+        with st.expander("Odczytaj kategorię z mojej usługi"):
+            st.caption("Otwórz swoją usługę w BUR – ID to liczba na końcu adresu (…podglad?id=1234567).")
+            sid = st.number_input("ID usługi w BUR", 0, 10**9, 0, key="sid")
+            if st.button("Odczytaj", disabled=not sid):
+                try:
+                    usl = api.BurClient(api_key=key, email=email, base_url=base, auth_path=auth_path,
+                                        auth_body=auth_body).service_by_id(sid, path)
+                except (api.BurApiError, OSError) as exc:
+                    usl = None
+                    st.error(str(exc))
+                if usl:
+                    st.session_state["kat_found"] = (usl.get("idKategoriiUslugi"), usl.get("idPodkategoriiUslugi"),
+                                                     usl.get("tytul", ""))
+                elif usl is None:
+                    st.warning("Nie znaleziono usługi o tym ID.")
+            if st.session_state.get("kat_found"):
+                kat_id, podkat_id, tytul = st.session_state["kat_found"]
+                st.success(f"„{tytul}” → kategoria **{kat_id}**, podkategoria **{podkat_id}**")
+
+                def _ustaw(k=kat_id, pk=podkat_id):
+                    st.session_state["kat_api"] = int(k or 0)
+                    st.session_state["podkat_api"] = int(pk or 0)
+                c_a, c_b = st.columns(2)
+                c_a.button("Użyj kategorii", on_click=lambda: _ustaw(pk=0))
+                c_b.button("Użyj podkategorii", on_click=_ustaw)
         newest_first = st.checkbox("Najpierw najnowsze usługi (zalecane)", value=True, key="newest_first",
                                    help="API zwraca usługi od najstarszych (2015 r.). Ta opcja pobiera ostatnie strony.")
 
@@ -117,7 +185,8 @@ with st.sidebar:
             if params is not None:
                 cfg = dict(key=key, email=email, base=base, auth_path=auth_path, auth_body=auth_body, path=path, params=params,
                            page_param=page_param, size_param=size_param, page_size=int(page_size),
-                           start_page=int(start_page), max_pages=int(max_pages), newest_first=newest_first)
+                           start_page=int(start_page), max_pages=int(max_pages), newest_first=newest_first,
+                           wojewodztwa=woj_api, kategoria=int(kategoria), podkategoria=int(podkategoria))
                 with st.spinner("Pobieram dane z API BUR… (szukanie najnowszych stron może potrwać do minuty)"):
                     try:
                         result = fetch_services(json.dumps(cfg, sort_keys=True))
@@ -130,15 +199,20 @@ with st.sidebar:
         info = st.session_state.get("fetch_info")
         if st.session_state.get("source") == "API BUR" and info is not None:
             n = len(st.session_state.get("records", []))
-            pages = info.get("pages", [])
-            st.success(f"Pobrano {n} usług" + (f" (strony {min(pages)}–{max(pages)})." if pages else "."))
+            st.success(f"Pobrano {n} usług.")
+            for r in info.get("regions", []):
+                linia = f"{r['region']}: {r['usług']} usług"
+                if r["ostatnia strona"]:
+                    linia += f", ostatnia strona {r['ostatnia strona']}"
+                if r["błąd"]:
+                    st.warning(f"{linia} – {r['błąd']}")
+                else:
+                    st.caption(linia)
             det = info.get("detected", {})
             opis = []
             if det:
                 opis.append(f"parametr strony: `{det['page_param'] or '—'}`")
                 opis.append(f"rekordów na stronę: {det['size']}" + (f" (`{det['size_param']}`)" if det["size_param"] else ""))
-            if info.get("last_page"):
-                opis.append(f"ostatnia strona: {info['last_page']}")
             opis.append(f"zapytań: {info.get('requests', 0)}"
                         + (f", w tym {info['probe_errors']} próbnych" if info.get("probe_errors") else ""))
             st.caption(" · ".join(opis))

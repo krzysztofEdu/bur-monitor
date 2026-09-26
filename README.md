@@ -33,6 +33,18 @@ różnić się od aktualnej dokumentacji (https://uslugirozwojowe.parp.gov.pl/ap
 3. Wyślij testowe zapytanie i sprawdź, czy wracają dane.
 4. Jeśli jakaś kolumna jest pusta (np. cena albo województwo), wskaż właściwe pole w sekcji „Mapowanie pól”.
 
+## Jak aplikacja pobiera dane z BUR
+
+API BUR (`GET /usluga`) zwraca usługi **od najstarszych**, zawsze po 25 na stronę, bez filtra
+statusu, daty ani sortowania. Obsługuje za to filtry `idWojewodztwa`, `idKategoriiUslugi`,
+`idPodkategoriiUslugi` (oraz m.in. `id`, `idProjektu`, `nipDostawcyUslug`). Dlatego:
+
+1. W panelu bocznym wybierz **województwa** i ustaw **ID kategorii/podkategorii**. Najprościej:
+   „Odczytaj kategorię z mojej usługi”, wpisz ID swojej usługi IT z BUR i kliknij „Użyj podkategorii”.
+2. Aplikacja pobiera każde województwo osobno. Ostatnią stronę znajduje wyszukiwaniem binarnym
+   i czyta strony wstecz, czyli od najnowszych usług.
+3. Ceny z API są w groszach i są przeliczane na złote.
+
 ## Testy
 
 ```bash
